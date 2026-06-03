@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+_*.log
+.claude/
+
+# Commit lightweight results so they can be pulled from the GPU server easily
+# (metrics CSVs, figures/GIF, best models, eval npz) — but exclude heavy or
+# regenerable artifacts to keep the repo lean (~60 MB total):
+results/ckpt/
+results/tb/
+results/*.zip

@@ -1,0 +1,2 @@
+# Keep shell scripts LF so `bash run_all.sh` works on the Linux GPU server
+*.sh text eol=lf
