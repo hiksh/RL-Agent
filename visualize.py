@@ -25,6 +25,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.patches import PathPatch
+from matplotlib.path import Path
 from matplotlib.animation import FuncAnimation
 
 from env import (F1DriverEnv, RAY_ANGLES, MAX_RAY, MAX_SPEED, TEMP_OVERHEAT, DRY, INTER, DT)
@@ -51,38 +53,47 @@ def _algo_cls(algo):
 
 # ── Track drawing ────────────────────────────────────────────────────────────
 def _track():
-    """Centerline + the SMOOTHED half-width the env actually uses for off-track
-    checks (raw left/right contours have spikes; centerline ± half_width gives the
-    same drivable corridor without the jaggies)."""
+    """Centerline, the half-width the env uses for off-track checks, and the unit
+    normal at the start line. (raw left/right contours have corner spikes; we render
+    from the centerline + half_width instead.)"""
     d = np.load(TRACK)
     cl = d["centerline"].astype(float); hw = d["half_width"].astype(float)
     tang = np.roll(cl, -1, 0) - np.roll(cl, 1, 0)
     tang /= np.linalg.norm(tang, axis=1, keepdims=True) + 1e-9
     nrm = np.column_stack([-tang[:, 1], tang[:, 0]])
-    # smooth the offset DIRECTION (circular moving average) so the edges don't
-    # self-intersect into spikes at hairpins; half_width itself is untouched.
-    k = 5; w = np.ones(k) / k
-    nrm = np.column_stack([np.convolve(np.r_[nrm[-k:, i], nrm[:, i], nrm[:k, i]], w,
-                                       "same")[k:-k] for i in (0, 1)])
-    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9
     return cl, hw, nrm
+
+def _road_path(cl, hw, extra, nseg=22):
+    """Buffer tube around the centerline (= the env's drivable region, lateral ≤
+    half_width) as ONE filled path: union of per-vertex disks + per-segment capsules
+    (all CCW so nonzero-winding fills the union). Never self-intersects into notches
+    at hairpins, unlike offsetting the edges directly; one artist keeps it fast."""
+    th = np.linspace(0, 2 * np.pi, nseg, endpoint=False)
+    unit = np.column_stack([np.cos(th), np.sin(th)])
+    V, C = [], []
+    def add(poly):
+        V.append(poly); V.append(np.zeros((1, 2)))           # +dummy vertex for CLOSEPOLY
+        C.extend([Path.MOVETO] + [Path.LINETO] * (len(poly) - 1) + [Path.CLOSEPOLY])
+    for i, (x, y) in enumerate(cl):
+        add(np.array([x, y]) + (hw[i] + extra) * unit)        # disk
+    for i in range(len(cl)):
+        a = cl[i]; b = cl[(i + 1) % len(cl)]; t = b - a; L = float(np.hypot(*t))
+        if L < 1e-6:
+            continue
+        n = np.array([-t[1], t[0]]) / L * (hw[i] + extra)
+        add(np.array([a - n, b - n, b + n, a + n]))           # capsule (CCW)
+    return Path(np.concatenate(V), C)
 
 def draw_track(ax):
     cl, hw, nrm = _track()
-    inner = cl - hw[:, None] * nrm
-    outer = cl + hw[:, None] * nrm
-    # asphalt ribbon: outer loop + reversed inner loop -> filled ring (infield hole)
-    band = np.vstack([outer, inner[::-1]])
-    ax.fill(band[:, 0], band[:, 1], color="#34383f", lw=0, zorder=1)
-    # smooth white kerb edges (rounded joins kill the corner spikes)
-    for e in (inner, outer):
-        ec = np.vstack([e, e[0]])
-        ax.plot(ec[:, 0], ec[:, 1], color="#f2f2f2", lw=2.2, zorder=3,
-                solid_capstyle="round", solid_joinstyle="round")
+    # white kerb underlay (slightly wider) then asphalt on top -> uniform clean border
+    ax.add_patch(PathPatch(_road_path(cl, hw, 4.0), facecolor="#f2f2f2", edgecolor="none", zorder=1))
+    ax.add_patch(PathPatch(_road_path(cl, hw, 0.0), facecolor="#34383f", edgecolor="none", zorder=2))
+    ax.autoscale_view()
     # subtle dashed centerline (kept faint so overlaid racing lines stand out)
     clc = np.vstack([cl, cl[0]])
     ax.plot(clc[:, 0], clc[:, 1], color="#FFD54F", lw=1.0, alpha=0.4,
-            dashes=(5, 7), zorder=2)
+            dashes=(5, 7), zorder=3)
     # start/finish line (perpendicular) + marker
     s, n = cl[0], nrm[0] * hw[0]
     ax.plot([s[0]-n[0], s[0]+n[0]], [s[1]-n[1], s[1]+n[1]],
