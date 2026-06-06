@@ -84,7 +84,8 @@ class F1DriverEnv(gym.Env):
                  progress_scale=PROGRESS_SCALE, time_pen=TIME_PEN,
                  overheat_pen=OVERHEAT_PEN, slip_pen=SLIP_PEN, pit_pen=PIT_PEN,
                  crash_pen=CRASH_PEN, complete_bonus=COMPLETE_BONUS,
-                 speed_reward=0.0, use_raycast=True, random_weather=False):
+                 speed_reward=0.0, finish_time_bonus=0.0,
+                 use_raycast=True, random_weather=False):
         super().__init__()
         # reward weights (kwargs default to the module constants -> baseline
         # behaviour unchanged; override per-instance for ablation studies)
@@ -92,6 +93,7 @@ class F1DriverEnv(gym.Env):
         self.overheat_pen = overheat_pen;     self.slip_pen = slip_pen
         self.pit_pen = pit_pen;               self.crash_pen = crash_pen
         self.complete_bonus = complete_bonus; self.speed_reward = speed_reward
+        self.finish_time_bonus = finish_time_bonus  # extra terminal reward scaled by how early the race finished
         self.use_raycast = use_raycast            # False -> mask ray obs (ablation)
         self.random_weather = random_weather      # True  -> random wet start (activate pit strategy)
         cl, left, right, half_w, length_m = _load_track()
@@ -306,6 +308,8 @@ class F1DriverEnv(gym.Env):
             terminated = True
         elif self.laps >= self.n_laps:
             reward += self.complete_bonus
+            # reward finishing fast: full bonus for an instant lap, ->0 at the time limit
+            reward += self.finish_time_bonus * max(1.0 - self.steps / self.max_steps, 0.0)
             terminated = True
 
         truncated = self.steps >= self.max_steps

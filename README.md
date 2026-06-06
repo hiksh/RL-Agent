@@ -26,7 +26,7 @@ Project 01의 1차원/이산형 *피트 월 전략가*를, 차량을 직접 조�
 6. [리워드 셰이핑 & Ablation](#6-리워드-셰이핑--ablation)
 7. [실행 방법](#7-실행-방법)
 8. [파일 구조](#8-파일-구조)
-9. [결과](#9-결과-학습-후-업데이트)
+9. [결과](#9-결과)
 
 ---
 
@@ -116,6 +116,8 @@ track.webp ──build_track.py──▶ assets/track.npz        (centerline / l
 | **Crash** | **`−500` + 종료** | raycast 기준 벽 충돌(트랙 이탈) |
 | **Complete** | **`+200` + 종료** | 목표 랩 완주 |
 
+> (선택) **Terminal time-bonus** `finish_time_bonus`(기본 0, Phase-2 §6-1에서만 사용): 완주 시 빠를수록 추가 보너스 → 진짜 목표(제한시간 내 최단 완주)를 보상에 직접 인코딩.
+
 ### 3-5. 종료 조건 (Termination)
 
 - **충돌**: 횡방향 이탈이 트랙 폭 초과 → `−500`, `terminated=True`
@@ -133,6 +135,7 @@ PDF 요구(① value-based ② policy-based ③ your solution)에 맞춘 라인�
 | **Baseline 1 (value-based)** | **DQN** | Discrete(21) | `DiscretizedF1Driver` 래퍼로 연속 Box를 21개 이산 액션으로 매핑 |
 | **Baseline 2 (policy-based)** | **PPO** | Box(4) | on-policy actor-critic |
 | **Your solution** | **SAC** | Box(4) | off-policy, 엔트로피 기반 탐색 — 연속 제어·확률적 동역학에 적합 |
+| **추가 비교군** | **TD3** | Box(4) | off-policy 결정론적 — SAC 대비 탐색 방식 비교용 |
 
 - **DiscretizedF1Driver** (`wrappers.py`): 조향 5단계 × {브레이크/코스트/스로틀} + {스로틀+ERS} 5개 + 피트 1개 = **21개 이산 액션**. DQN이 동일 환경에서 baseline으로 동작하도록 함.
 - **SAC를 your solution으로 선택한 근거**:
@@ -166,8 +169,32 @@ PDF 요구(① value-based ② policy-based ③ your solution)에 맞춘 라인�
 | `baseline` | 설계 그대로 | 기준 |
 | `no_shaping` | overheat/slip/time 페널티 제거 | **보상 셰이핑이 실제로 도움이 되는가** |
 | `aggressive` | crash_pen 200 + speed_reward 0.02 | **충돌 회피 과다("소심한 정책")** 완화 효과 |
+| `racing` | crash_pen 100 + speed_reward 0.05 | brake-and-park 국소최적 탈출 (메인 학습에 사용한 프리셋) |
 
-→ 이 변형들이 곧 **your solution(SAC)의 ablation study**를 구성합니다.
+→ 이 변형들이 곧 **your solution(SAC)의 ablation study**를 구성합니다(결과는 §9-4). raycast 센서 on/off(`--no-raycast`) ablation은 §9-5.
+
+### 6-1. Phase-2: 타임어택 reward 설계 (진짜 목표 직접 최적화)
+
+본 과제의 *진짜* 목표는 **제한시간(3랩 = 375 s) 안에 가능한 빠르게 완주**하는 것입니다. 분석 결과 이 환경은
+**시간제한이 binding**(완주 랩타임이 제한선에 근접)이라, "빠르게"와 "완주"가 같은 방향입니다 — 즉 페이스를 끌어올리면
+성공률↑·랩타임↓이 동시에 개선되며, 한계는 충돌입니다. 그런데 기존 완주 보너스는 **고정 +200**이라 *얼마나 빨리*
+끝냈는지를 반영하지 못합니다. 이를 보완하는 **terminal time-bonus**를 추가했습니다(env kwarg `finish_time_bonus`, 기본 0 → 비파괴):
+
+```
+완주 시  reward += complete_bonus + finish_time_bonus × max(1 − steps/max_steps, 0)
+```
+
+완주가 빠를수록(steps 작을수록) 보너스가 커집니다. 한계효과는 `−finish_time_bonus/max_steps`(예: 300/1500 = 0.2/step)로
+dense `time_pen`(0.03)보다 강하지만 **완주해야만 받는 terminal 신호**라 정지(park) 정책은 영향받지 않고 완주 정책만 가속하도록 유도합니다.
+
+| Preset | 설정 (vs `racing`) | 격리하는 레버 |
+|--------|--------------------|----------------|
+| `timeattack_dense` | speed_reward 0.10 + time_pen 0.06 | dense 페이스 압력 강화 |
+| `timeattack_finish` | + finish_time_bonus 300 | terminal 빠른-완주 보너스 |
+| `timeattack` | dense + terminal 둘 다 | 풀 제안 |
+
+학습: `bash run_phase2.sh` (SAC 3프리셋 × 3시드 from-scratch + best `racing` 모델 warm-start fine-tune).
+**평가는 불변 지표(랩타임/성공률/크래시율)로만** — 프리셋마다 보상 스케일이 달라 보상끼리 비교 불가. 결과는 §9-7.
 
 ---
 
@@ -191,9 +218,17 @@ python train.py --algo sac --timesteps 500000 --seed 0
 python train.py --algo sac --reward-preset no_shaping --seed 0
 python train.py --algo sac --reward-preset aggressive --seed 0
 
+# 3b) Phase-2 타임어택 reward 설계 (§6-1) — from-scratch sweep + fine-tune
+python train.py --algo sac --reward-preset timeattack --seed 0
+#  best 모델에서 저LR warm-start fine-tune:
+python train.py --algo sac --reward-preset timeattack --seed 0 \
+    --init-from results/sac_racing_seed0_best/best_model.zip --learning-rate 1e-4 --timesteps 200000
+
 # 4) 시각화 (results/의 모델·로그를 자동 탐색)
 python visualize.py
 ```
+
+서버에서 전체를 한 번에 돌리려면: **메인+ablation은 `bash run_all.sh`**, **Phase-2는 `bash run_phase2.sh`**(run_all 이후 실행).
 
 **출력물** (`results/`): `<algo>_seed<seed>.zip`(모델), `<algo>_seed<seed>_best/`(best), `<algo>_seed<seed>_metrics.csv`, `eval/evaluations.npz`, `tb/`(tensorboard), `viz/*.png|gif`.
 
@@ -206,33 +241,103 @@ python visualize.py
 ├── build_track.py    # 트랙 이미지 → 2D 중앙선/경계 추출 (assets/track.npz)
 ├── env.py            # F1DriverEnv (gymnasium 연속 환경: 상태·행동·전이·보상)
 ├── wrappers.py       # DiscretizedF1Driver (DQN용 21개 이산 액션)
-├── train.py          # SB3 학습 파이프라인 (DQN/PPO/SAC, eval·ckpt·metrics·tb)
-├── visualize.py      # 트랙맵·레이싱라인·raycast GIF·학습곡선·알고리즘 비교
+├── train.py          # SB3 학습 파이프라인 (DQN/PPO/SAC/TD3, 프리셋·fine-tune·eval·ckpt·metrics·tb)
+├── visualize.py      # 트랙맵·레이싱라인·raycast GIF·학습곡선·알고리즘 비교·ablation
+├── run_all.sh        # 메인 매트릭스(4 algo×5 seed) + 보상/raycast ablation + viz (GPU 서버)
+├── run_phase2.sh     # Phase-2 타임어택 reward sweep + warm-start fine-tune + viz
 ├── requirements.txt
 ├── assets/           # track.npz, track_preview.png
-└── results/          # 학습 결과물 (.gitignore)
+└── results/          # 학습 결과물 (CSV·figure·best 모델 일부만 커밋, 나머지 .gitignore)
 ```
 
 ---
 
-## 9. 결과 (학습 후 업데이트)
+## 9. 결과
 
-> 본 섹션은 GPU 서버 본학습 완료 후 채워집니다. (현재 PPO 300k 검증: ep_rew −498 → −78 로 학습 확인)
+GPU 서버에서 **메인 4개 알고리즘 × 5 시드** (`racing` 보상 프리셋, 날씨 토글은 랩 경계에서 자연 발생) +
+**SAC ablation**(보상 프리셋 4종 / raycast on·off)을 학습했습니다. 학습량: DQN·SAC·TD3 각 500k,
+PPO 1M timestep. 모든 수치는 **마지막 300 에피소드 평균 (± 시드 표준편차)** 입니다.
+
+> **평가 지표 주의**: 보상은 **대리(surrogate) 지표**이고, 본 과제의 *진짜* 목표는 **충돌 없이 빠르게 완주**하는 것입니다.
+> 따라서 핵심 지표는 **랩타임(초, 성공 에피소드에 한해 `ep_len·DT/N_LAPS`)·성공률·크래시율**이며, 보상은 보조로만 봅니다.
+> 또한 **보상 프리셋이 다르면 보상 스케일이 달라 서로 비교 불가** — ablation은 랩타임·성공률·진행거리로 판단합니다.
 
 ### 9-1. 학습 곡선 — `results/viz/learning_curves.png`
-*(DQN vs PPO vs SAC 에피소드 보상)*
 
-### 9-2. 성공률 / 크래시율 — `results/viz/success_curves.png`
+x축을 **timestep**으로 두어(에피소드 인덱스가 아님), 즉시 충돌해 짧은 에피소드를 수천 개 만드는 DQN과
+긴 에피소드의 연속제어 알고리즘을 공정하게 비교합니다.
 
-### 9-3. 알고리즘 비교 — `results/viz/metric_comparison.png`
-| 방법 | 성공률 | 크래시율 | 평균 보상 | 완주 스텝(↓) |
-|------|--------|----------|-----------|--------------|
-| DQN | TBD | TBD | TBD | TBD |
-| PPO | TBD | TBD | TBD | TBD |
-| **SAC** | TBD | TBD | TBD | TBD |
+- **SAC**: 샘플 효율이 가장 좋음 — ~350k에서 보상 ~165로 가장 빠르게 수렴.
+- **PPO**: 더 느리게 오르지만 1M까지 꾸준히 상승해 최종 ~145로 SAC와 동급.
+- **TD3**: 초반 −210까지 떨어졌다가 회복(~−45)하나 끝까지 양(+)으로 못 올라옴.
+- **DQN**: ~−90에서 평탄 — 이산화된 액션으로는 주행 자체를 학습하지 못함.
 
-### 9-4. 레이싱 라인 / 주행 영상 — `results/viz/traj_<algo>.png`, `drive_<algo>.gif`
-*(속도 색상 궤적 + raycast·텔레메트리 애니메이션)*
+### 9-2. 알고리즘 비교 — `results/viz/metric_comparison.png`
 
-### 9-5. Ablation (SAC) — baseline vs no_shaping vs aggressive
-*(리워드 설계 타당성 근거)*
+| 방법 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | 평균 진행거리(m) | 평균 보상(대리) |
+|------|------------:|---------:|-----------:|-----------------:|----------------:|
+| DQN  | — (완주 없음) | 0.0 % | 98.9 % |   767 |  −86 |
+| **PPO** | 121.3 | **6.9 %** | 30.8 % | **5099** | **142** |
+| **SAC** | **118.3** | 2.8 % | **18.5 %** | 4834 | 106 |
+| TD3  | 120.5 | 1.2 % | 18.9 % | 2520 |  −86 |
+
+- **이산화 value-based(DQN)의 붕괴**: 21개 이산 액션으로는 거의 즉시(평균 767 m) 충돌(크래시 98.9 %)하며 완주 0건.
+  연속 제어 문제를 이산화로 푸는 접근의 한계를 명확히 보여줍니다.
+- **PPO vs SAC (핵심 트레이드오프)**: PPO가 **완주를 가장 자주(6.9 %)** 성공하고 가장 멀리 가지만,
+  SAC는 **랩타임이 가장 짧고(118.3 s) 가장 안전(크래시 18.5 %)** 합니다 → "자주 끝내는 PPO" vs "빠르고 안전한 SAC".
+- 전반적으로 성공률이 낮은(≤ 7 %) 이유: 3랩 내내 코너·타이어 과열·날씨/피트 이벤트를 모두 통과해야 하는
+  난도 높은 마이크로 레이스이기 때문입니다(결정론적 롤아웃은 더 멀리 감 — §9-3).
+
+### 9-3. 레이싱 라인 / 주행 영상 — `results/viz/traj_<algo>.png`, `drive_sac.gif`
+
+속도 색상 궤적(`traj_*`)과 raycast·텔레메트리 애니메이션(`drive_sac.gif`). 결정론적 롤아웃(seed 7) 기준
+**SAC는 2랩 이상을 안정적으로 주행**(직선 가속 → 코너 감속, reward ~454)하며, 충돌 시 빨간 X로 종료 지점을 표시합니다.
+
+### 9-4. 보상 셰이핑 Ablation (SAC) — `results/viz/reward_ablation.png`
+
+SAC를 4개 보상 프리셋으로 학습(`baseline`/`no_shaping`/`aggressive`/`racing`, seed 0; `racing`은 5 시드):
+
+| 프리셋 | 성공률 | 크래시율 | 진행거리(m) | 거동 |
+|--------|-------:|---------:|------------:|------|
+| baseline   | 0 % | 4.7 % |  648 | 코너 앞에서 정지 후 주차("brake-and-park") |
+| no_shaping | 0 % | 6.3 % |  747 | 동일하게 주차 |
+| aggressive | 0 % | 8.3 % |  775 | 거의 주차(방향만 약간 개선) |
+| **racing** | **2.8 %** | 18.5 % | **4834** | **유일하게 실제 주행** |
+
+→ **핵심 발견**: 충돌 페널티(−500)가 시간 페널티를 압도하면, 약한 정책은 코너에서 **완전 정지**하는 안전한 국소최적("brake-and-park")에 갇힙니다.
+속도 보상을 강하게 준 `racing` 프리셋(crash_pen 100 + speed_reward 0.05)만 이 국소최적을 탈출해 진행거리가 7× 이상 증가합니다.
+즉 **보상 셰이핑은 단순 미세조정이 아니라 학습 성패를 가르는 요소**입니다. (크래시율이 함께 오르는 것은 정지 대신 실제로 코너에 진입하기 때문 — 의도된 trade-off)
+
+### 9-5. Raycast 센서 Ablation (SAC) — `results/viz/raycast_ablation.png`
+
+`racing` SAC에서 5개 raycast 거리 센서를 끄고(`--no-raycast`) 학습 (seed 0 기준):
+
+| 설정 | 크래시율 | 진행거리(m) | 평균 보상 |
+|------|---------:|------------:|----------:|
+| raycast **ON**  (seed 0) | 14.0 % | 2901 |  32 |
+| raycast **OFF** (seed 0) | 31.3 % | 7653 | 220 |
+
+→ 센서를 끄면 진행거리·보상은 오히려 커지지만 **크래시율이 약 2배**로 뜁니다. raycast는 벽 거리 정보를 제공해
+**충돌을 회피(안전성↑)** 하는 대신 다소 보수적으로 만듭니다 — 센서가 안전한 주행에 기여함을 확인.
+(메인 비교의 raycast-ON SAC는 5 시드 평균 크래시 18.5 %; OFF는 단일 시드라 절대수치보다 **경향**으로 해석)
+
+### 9-7. Phase-2 타임어택 reward 설계 — `results/viz/timeattack_ablation.png`, `finetune_compare.png`
+
+> `bash run_phase2.sh` 완료 후 채워집니다. (§6-1 설계, 불변 지표 = 랩타임/성공률/크래시율)
+
+| 프리셋 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | 비고 |
+|--------|------------:|---------:|-----------:|------|
+| racing (base) | 118.3 | 2.8 % | 18.5 % | Phase-1 기준 |
+| timeattack_dense | TBD | TBD | TBD | dense 페이스만 |
+| timeattack_finish | TBD | TBD | TBD | terminal 보너스만 |
+| timeattack | TBD | TBD | TBD | 둘 다 |
+| **timeattack (fine-tune)** | TBD | TBD | TBD | best racing → warm-start |
+
+*(빈칸은 학습 후 채움 — 어느 reward가 제한시간 내 최단 랩타임을 내는지, 속도↔안전 trade-off와 함께 보고)*
+
+### 9-8. 요약
+
+- **연속 제어(PPO/SAC/TD3) ≫ 이산화 value-based(DQN)** — 이 문제에서 액션 이산화는 치명적.
+- **SAC = 가장 빠르고 안전**(your solution으로서 타당), **PPO = 가장 자주 완주** — 둘이 상보적.
+- 보상 셰이핑(§9-4)이 brake-and-park 국소최적 탈출에 결정적이고, raycast 센서(§9-5)는 안전성에 기여.
+- Phase-2(§9-7): 진짜 목표(제한시간 내 최단 완주)를 terminal reward에 직접 인코딩해 최적 reward를 탐색.

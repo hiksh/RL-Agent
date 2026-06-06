@@ -50,6 +50,11 @@ REWARD_PRESETS = {
     "no_shaping": dict(overheat_pen=0.0, slip_pen=0.0, time_pen=0.0),  # only progress/crash/finish
     "aggressive": dict(crash_pen=200.0, speed_reward=0.02),            # less timid, reward speed
     "racing":     dict(crash_pen=100.0, speed_reward=0.05),           # strong anti-stop (escape "brake-and-park")
+    # Phase-2 time-attack study (vs `racing` baseline) — target the true objective:
+    # finish the 3 laps within the time limit, as fast as possible.
+    "timeattack_dense":  dict(crash_pen=100.0, speed_reward=0.10, time_pen=0.06),  # stronger dense pace pressure
+    "timeattack_finish": dict(crash_pen=100.0, speed_reward=0.05, finish_time_bonus=300.0),  # terminal fast-finish bonus
+    "timeattack":        dict(crash_pen=100.0, speed_reward=0.10, time_pen=0.06, finish_time_bonus=300.0),  # both
 }
 
 
@@ -139,6 +144,7 @@ def train_one(algo, args, device):
 
     tag = algo + ("" if preset == "baseline" else f"_{preset}")
     tag += ("_noray" if args.no_raycast else "") + ("_wx" if args.random_weather else "")
+    tag += ("_ft" if args.init_from else "")          # warm-started fine-tune run
     tag += f"_seed{args.seed}"
 
     steps = args.timesteps or (3_000 if args.smoke else DEFAULT_STEPS[algo])
@@ -164,7 +170,15 @@ def train_one(algo, args, device):
         EpisodeMetrics(os.path.join(RESULTS, f"{tag}_metrics.csv")),
     ]
 
-    model = build_model(algo, venv, device, args.seed, os.path.join(RESULTS, "tb"))
+    tb = os.path.join(RESULTS, "tb")
+    if args.init_from:                                # warm-start fine-tuning
+        co = {"learning_rate": args.learning_rate,
+              "lr_schedule": lambda _: args.learning_rate} if args.learning_rate else {}
+        print(f"fine-tuning from {args.init_from}" + (f"  lr={args.learning_rate}" if co else ""))
+        model = spec["cls"].load(args.init_from, env=venv, device=device,
+                                 tensorboard_log=tb, custom_objects=co)
+    else:
+        model = build_model(algo, venv, device, args.seed, tb)
     model.learn(total_timesteps=steps, progress_bar=not args.smoke,
                 tb_log_name=tag, callback=callbacks)
 
@@ -185,6 +199,10 @@ def main():
     p.add_argument("--save-freq", type=int, default=100_000)
     p.add_argument("--reward-preset", choices=list(REWARD_PRESETS), default="baseline",
                    help="reward-shaping variant for ablation (see REWARD_PRESETS)")
+    p.add_argument("--init-from", default="",
+                   help="warm-start from a model .zip (fine-tuning); run is tagged _ft")
+    p.add_argument("--learning-rate", type=float, default=0.0,
+                   help="override LR (use with --init-from for low-LR fine-tune)")
     p.add_argument("--no-raycast", action="store_true", help="mask raycast obs (sensor ablation)")
     p.add_argument("--random-weather", action="store_true",
                    help="random wet start each episode (activate tire/pit strategy)")

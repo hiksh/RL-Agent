@@ -172,14 +172,6 @@ def _seed_csvs(tag):
     paths = sorted(glob.glob(os.path.join(RESULTS, f"{tag}_seed*_metrics.csv")))
     return [np.genfromtxt(p, delimiter=",", names=True) for p in paths]
 
-def _agg_curve(arrays, key, w=100):
-    curves = [_smooth(np.atleast_1d(a[key]).astype(float), w) for a in arrays if a.size]
-    curves = [c for c in curves if len(c)]
-    if not curves:
-        return None
-    n = min(map(len, curves)); M = np.vstack([c[:n] for c in curves])
-    return M.mean(0), M.std(0)
-
 def _final(arrays, key, last=300):
     vals = [np.atleast_1d(a[key]).astype(float)[-last:].mean() for a in arrays if a.size]
     return (np.mean(vals), np.std(vals)) if vals else (np.nan, 0.0)
@@ -197,21 +189,29 @@ def _laptime(arrays, last=300):
 
 
 # ── Comparison figures ───────────────────────────────────────────────────────
-def plot_learning_curves(groups, save):
-    """groups: list of (label, tag, color)."""
+def plot_learning_curves(groups, save, w=100):
+    """groups: list of (label, tag, color). x-axis is environment timestep so
+    algorithms with very different episode counts (DQN crashes early -> thousands
+    of short episodes) stay comparable."""
     fig, ax = plt.subplots(figsize=(11, 4.5)); fig.patch.set_facecolor("white")
     any_data = False
     for label, tag, color in groups:
-        agg = _agg_curve(_seed_csvs(tag), "ep_reward")
-        if agg is None:
+        arrays = [a for a in _seed_csvs(tag) if a.size]
+        ys = [_smooth(np.atleast_1d(a["ep_reward"]).astype(float), w) for a in arrays]
+        xs = [np.atleast_1d(a["timestep"]).astype(float)[w-1:w-1+len(y)]
+              for a, y in zip(arrays, ys)]
+        pairs = [(x, y) for x, y in zip(xs, ys) if len(y)]
+        if not pairs:
             continue
         any_data = True
-        m, s = agg; x = np.arange(len(m))
+        n = min(len(y) for _, y in pairs)
+        x = np.vstack([p[0][:n] for p in pairs]).mean(0)
+        M = np.vstack([p[1][:n] for p in pairs]); m, s = M.mean(0), M.std(0)
         ax.plot(x, m, color=color, lw=1.8, label=label)
         ax.fill_between(x, m-s, m+s, color=color, alpha=0.15)
     if not any_data:
         plt.close(fig); return
-    ax.set_xlabel("Episode"); ax.set_ylabel("Episode reward (smoothed)")
+    ax.set_xlabel("Timestep"); ax.set_ylabel("Episode reward (smoothed)")
     ax.set_title("Learning Curves (mean ± std over seeds)"); ax.legend(); ax.grid(alpha=0.3)
     _save(fig, save)
 
@@ -272,6 +272,10 @@ MAIN = [("DQN", "dqn_racing", "#1E88E5"), ("PPO", "ppo_racing", "#F5A623"),
 REWARD_ABL = [("baseline", "sac", "#9E9E9E"), ("no_shaping", "sac_no_shaping", "#90CAF9"),
               ("aggressive", "sac_aggressive", "#FFB74D"), ("racing", "sac_racing", "#D0021B")]
 RAYCAST_ABL = [("raycast ON", "sac_racing", "#2E7D32"), ("raycast OFF", "sac_racing_noray", "#C62828")]
+# Phase-2 time-attack reward study (vs the `racing` baseline) + warm-start fine-tune.
+TIMEATTACK  = [("racing", "sac_racing", "#9E9E9E"), ("ta_dense", "sac_timeattack_dense", "#90CAF9"),
+               ("ta_finish", "sac_timeattack_finish", "#FFB74D"), ("timeattack", "sac_timeattack", "#D0021B")]
+FINETUNE    = [("racing (base)", "sac_racing", "#9E9E9E"), ("timeattack FT", "sac_timeattack_ft", "#D0021B")]
 
 
 def main():
@@ -297,6 +301,10 @@ def main():
                         "SAC Reward-shaping Ablation")
     plot_bar_comparison(RAYCAST_ABL, os.path.join(VIZ, "raycast_ablation.png"),
                         "SAC Raycast Sensor Ablation")
+    plot_bar_comparison(TIMEATTACK, os.path.join(VIZ, "timeattack_ablation.png"),
+                        "SAC Time-attack Reward Study (true objective)")
+    plot_bar_comparison(FINETUNE, os.path.join(VIZ, "finetune_compare.png"),
+                        "SAC racing -> time-attack fine-tune")
     plot_eval_curve()
     print("\nDone. Figures in results/viz/")
 
