@@ -51,21 +51,45 @@ def _algo_cls(algo):
 
 # ── Track drawing ────────────────────────────────────────────────────────────
 def _track():
+    """Centerline + the SMOOTHED half-width the env actually uses for off-track
+    checks (raw left/right contours have spikes; centerline ± half_width gives the
+    same drivable corridor without the jaggies)."""
     d = np.load(TRACK)
-    return d["centerline"], d["left"], d["right"]
+    cl = d["centerline"].astype(float); hw = d["half_width"].astype(float)
+    tang = np.roll(cl, -1, 0) - np.roll(cl, 1, 0)
+    tang /= np.linalg.norm(tang, axis=1, keepdims=True) + 1e-9
+    nrm = np.column_stack([-tang[:, 1], tang[:, 0]])
+    # smooth the offset DIRECTION (circular moving average) so the edges don't
+    # self-intersect into spikes at hairpins; half_width itself is untouched.
+    k = 5; w = np.ones(k) / k
+    nrm = np.column_stack([np.convolve(np.r_[nrm[-k:, i], nrm[:, i], nrm[:k, i]], w,
+                                       "same")[k:-k] for i in (0, 1)])
+    nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9
+    return cl, hw, nrm
 
 def draw_track(ax):
-    cl, left, right = _track()
-    band = np.vstack([left, right[::-1]])
-    ax.fill(band[:, 0], band[:, 1], color="#3a3a3a", zorder=1)
-    for b in (left, right):
-        bb = np.vstack([b, b[0]])
-        ax.plot(bb[:, 0], bb[:, 1], color="#ECECEC", lw=1.4, zorder=2)
+    cl, hw, nrm = _track()
+    inner = cl - hw[:, None] * nrm
+    outer = cl + hw[:, None] * nrm
+    # asphalt ribbon: outer loop + reversed inner loop -> filled ring (infield hole)
+    band = np.vstack([outer, inner[::-1]])
+    ax.fill(band[:, 0], band[:, 1], color="#34383f", lw=0, zorder=1)
+    # smooth white kerb edges (rounded joins kill the corner spikes)
+    for e in (inner, outer):
+        ec = np.vstack([e, e[0]])
+        ax.plot(ec[:, 0], ec[:, 1], color="#f2f2f2", lw=2.2, zorder=3,
+                solid_capstyle="round", solid_joinstyle="round")
+    # subtle dashed centerline (kept faint so overlaid racing lines stand out)
     clc = np.vstack([cl, cl[0]])
-    ax.plot(clc[:, 0], clc[:, 1], "--", color="#FFD54F", lw=1.0, alpha=0.7, zorder=3)
-    ax.plot(cl[0, 0], cl[0, 1], "o", color="#00E676", ms=11, zorder=6,
-            markeredgecolor="white", markeredgewidth=1.2)
-    ax.set_aspect("equal"); ax.axis("off")
+    ax.plot(clc[:, 0], clc[:, 1], color="#FFD54F", lw=1.0, alpha=0.4,
+            dashes=(5, 7), zorder=2)
+    # start/finish line (perpendicular) + marker
+    s, n = cl[0], nrm[0] * hw[0]
+    ax.plot([s[0]-n[0], s[0]+n[0]], [s[1]-n[1], s[1]+n[1]],
+            color="#00E676", lw=3.0, zorder=5, solid_capstyle="round")
+    ax.plot(s[0], s[1], "o", color="#00E676", ms=9, zorder=6,
+            markeredgecolor="white", markeredgewidth=1.4)
+    ax.set_aspect("equal"); ax.axis("off"); ax.margins(0.03)
 
 def plot_track_map():
     fig, ax = plt.subplots(figsize=(11, 8)); fig.patch.set_facecolor("white")
