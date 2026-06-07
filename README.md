@@ -25,7 +25,7 @@ F1 레이스를 **2차원 연속 주행 MDP**로 모델링하고, **Model-free D
 - **SAC = 가장 빠르고(랩타임 118.3 s) 가장 안전(크래시 18.5%)**, **PPO = 가장 자주 완주(성공률 6.9%)** — 두 방법이 상보적.
 - **보상 설계가 학습 성패를 가릅니다**: 잘못된 보상에선 정책이 코너 앞에서 멈춰버리는 "brake-and-park" 국소최적에 갇히고, `racing` 보상만 이를 탈출합니다(§9-4).
 - raycast 센서를 끄면 **크래시율이 약 2배**로 뛰어, 센서가 안전 주행에 기여함을 확인(§9-5).
-- **진행 중(Phase-2)**: 본 과제의 진짜 목표인 "제한시간 내 최단 완주"를 **보상에 직접 인코딩**해 최적 reward를 탐색 중(§6-1, §9-7).
+- **Phase-2**: 본 과제의 진짜 목표인 "제한시간 내 최단 완주"를 **보상에 직접 인코딩** → `timeattack`(dense+terminal) 보상이 racing 대비 랩타임·성공률·크래시율을 **동시에** 개선하는 최적 reward로 선정(§6-1, §9-7).
 
 ![알고리즘 비교](results/viz/metric_comparison.png)
 
@@ -453,26 +453,49 @@ brake-and-park 위험 없이 안전하게 페이스를 끌어올릴 것으로 �
 ② 최고 `racing` 정책을 그 보상으로 warm-start fine-tune해 **랩타임 추가 단축 + 안전(크래시) trade-off**를 측정.
 "진짜 목표를 지표(랩타임)에 맞춰 보상까지 설계했다"는 닫힌 루프가 이 프로젝트의 마무리입니다.
 
-### 9-7. Phase-2 결과 (학습 후 업데이트)
+### 9-7. Phase-2 결과 — 최적 reward 선정
 
-> 🚧 `bash run_phase2.sh` 완료 후 figure(`results/viz/timeattack_ablation.png`, `finetune_compare.png`)와 아래 표를 채웁니다.
+![타임어택 ablation](results/viz/timeattack_ablation.png)
+
+SAC 3프리셋 × 3시드 from-scratch sweep. 모든 수치는 §9 전체와 동일하게 **마지막 300 에피소드 평균**,
+랩타임은 **성공 에피소드에 한해** `ep_len·DT/N_LAPS`(보상 스케일이 다르므로 불변 지표로만 비교).
 
 | 프리셋 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | 비고 |
 |--------|------------:|---------:|-----------:|------|
-| racing (base) | 118.3 | 2.8 % | 18.5 % | Phase-1 기준 |
-| timeattack_dense | TBD | TBD | TBD | dense 페이스만 |
-| timeattack_finish | TBD | TBD | TBD | terminal 보너스만 |
-| timeattack | TBD | TBD | TBD | 둘 다 |
-| **timeattack (fine-tune)** | TBD | TBD | TBD | best racing → warm-start |
+| racing (base) | 118.3 | 2.8 % | 18.5 % | Phase-1 기준 (5 seed) |
+| timeattack_dense | 117.8 | 4.6 % | **13.3 %** | dense 페이스만 — 가장 안전 |
+| timeattack_finish | 120.1 ※ | 1.7 % | 21.4 % | terminal만 — 효과 없음(오히려 악화) |
+| **timeattack** | **114.1** | **5.4 %** | 15.0 % | **둘 다 — 최적(3지표 모두 base 대비 개선)** |
+| timeattack (fine-tune) | — 완주 0 | 0.0 % | 59.7 % † | warm-start 붕괴 |
 
-*(빈칸은 학습 후 채움 — 어느 reward가 제한시간 내 최단 랩타임을 내는지, 속도↔안전 trade-off와 함께 보고)*
+<sub>※ `timeattack_finish`는 3시드 중 1시드만 완주에 성공 → 랩타임은 단일 시드 추정치.
+† fine-tune 3시드의 metrics CSV가 **바이트 단위로 동일**(`run_phase2.sh`/metrics 태그의 시드 미반영 로깅 버그) →
+best 모델은 시드별로 다르나 학습 곡선은 단일 트레이스로만 신뢰. 절대수치보다 **붕괴 경향**으로만 해석.</sub>
+
+**선정: `timeattack`(dense + terminal 둘 다)가 최적.** racing 대비 **랩타임 −4.2 s(118.3→114.1)**,
+**성공률 ≈2배(2.8→5.4 %)**, **크래시율 −3.5 pp(18.5→15.0 %)**로 세 지표를 **동시에** 개선(Pareto) — §6-1 가설대로
+시간제한이 binding이라 페이스를 미는 보상이 "더 빠르게 + 더 자주 완주"를 함께 달성합니다.
+
+**레버 분리 해석**:
+- **dense가 핵심 레버**: `timeattack_dense`만으로도 더 안전(13.3 %)하고 완주가 늘어(4.6 %) brake-and-park 쪽으로
+  되돌아가지 않음 — speed_reward↑/time_pen↑이 코너에서도 페이스를 유지하게 함.
+- **terminal 단독(`finish`)은 효과 없음**: 완주해야만 받는 신호라 **아직 거의 완주를 못 하는 단계**에선 보상이
+  너무 sparse해 학습을 못 끌어줌(오히려 base보다 악화). 단, **dense로 완주 빈도를 먼저 올린 뒤** terminal을
+  더하면(`timeattack`) 그 위에서 추가로 가속 → 두 레버는 **상보적**.
+
+![fine-tune 비교](results/viz/finetune_compare.png)
+
+**fine-tune은 실패**: 최고 `racing` 정책에서 저LR warm-start로 `timeattack` 보상을 입혔더니 진행거리 ~600 m,
+크래시 59.7 %로 **붕괴**(완주 0). 이미 수렴한 정책에 더 공격적인 보상을 얹는 것이 오히려 학습된 안전 거동을
+무너뜨린 것으로 보입니다 — **from-scratch sweep이 fine-tune보다 안정적**이라는 (다소 의외의) 결론.
+다만 위 † 로깅 이슈로 3시드 robustness는 미확정이라, **단정보다 경향**으로 보고합니다.
 
 ### 9-8. 요약
 
 - **연속 제어(PPO/SAC/TD3) ≫ 이산화 value-based(DQN)** — 이 문제에서 액션 이산화는 치명적.
 - **SAC = 가장 빠르고 안전**(your solution으로서 타당), **PPO = 가장 자주 완주** — 둘이 상보적.
 - 보상 셰이핑(§9-4)이 brake-and-park 탈출에 결정적, raycast 센서(§9-5)는 안전성에 기여.
-- Phase-2(§9-6/7): 진짜 목표(제한시간 내 최단 완주)를 terminal reward에 직접 인코딩해 최적 reward 탐색.
+- Phase-2(§9-6/7): 진짜 목표(제한시간 내 최단 완주)를 보상에 직접 인코딩 → **`timeattack`(dense+terminal)이 최적** — racing 대비 랩타임 −4.2 s·성공률 ≈2배·크래시율 −3.5 pp(Pareto 개선). dense가 핵심 레버, terminal 단독은 sparse해 무효, warm-start fine-tune은 붕괴.
 
 ---
 
