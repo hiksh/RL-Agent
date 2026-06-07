@@ -316,6 +316,8 @@ FINETUNE    = [("racing (base)", "sac_racing", "#9E9E9E"), ("timeattack FT", "sa
 PHASE3 = [("timeattack", "sac_timeattack", "#9E9E9E"), ("curric λ=0", "sac_timeattack_rs_sp0.0", "#90CAF9"),
           ("λ=0.02", "sac_timeattack_rs_sp0.02", "#FFB74D"), ("λ=0.05", "sac_timeattack_rs_sp0.05", "#FF7043"),
           ("λ=0.1", "sac_timeattack_rs_sp0.1", "#D0021B")]
+LOOKAHEAD = [("curric (no LA)", "sac_timeattack_rs_sp0.0", "#9E9E9E"),
+             ("+ look-ahead", "sac_timeattack_rs_sp0.0_la", "#2E7D32")]
 
 
 def main():
@@ -347,6 +349,8 @@ def main():
                         "SAC racing -> time-attack fine-tune")
     plot_bar_comparison(PHASE3, os.path.join(VIZ, "phase3_curriculum_smooth.png"),
                         "Phase-3: random-start curriculum + smoothness λ (idx=0 eval)", kind="eval0")
+    plot_bar_comparison(LOOKAHEAD, os.path.join(VIZ, "phase3_lookahead.png"),
+                        "Phase-3: curvature look-ahead ablation (idx=0 eval)", kind="eval0")
     plot_eval_curve()
     print("\nDone. Figures in results/viz/")
 

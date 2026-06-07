@@ -43,6 +43,14 @@ for SEED in $SEEDS; do
   done
 done
 
+# --- curvature look-ahead ablation (orthogonal to λ) -------------------------
+#   toggle ONLY look-ahead on top of the curriculum baseline (λ=0) -> the sp0.0
+#   run above is the no-look-ahead control; compare on the idx=0 eval.
+for SEED in $SEEDS; do
+  run --algo sac --reward-preset timeattack --steer-pen 0.0 --random-start --lookahead \
+      --timesteps $STEPS --seed $SEED
+done
+
 # --- figures -----------------------------------------------------------------
 echo ">>> [$(date +%H:%M:%S)] visualize"
 python visualize.py || echo "!!! viz failed"

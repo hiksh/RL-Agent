@@ -176,11 +176,14 @@ def train_one(algo, args, device):
         env_kwargs["steer_pen"] = args.steer_pen
     if args.random_start:
         env_kwargs["random_start"] = True
+    if args.lookahead:
+        env_kwargs["lookahead"] = True
 
     tag = algo + ("" if preset == "baseline" else f"_{preset}")
     tag += ("_noray" if args.no_raycast else "") + ("_wx" if args.random_weather else "")
     tag += ("_rs" if args.random_start else "")
     tag += (f"_sp{args.steer_pen}" if args.steer_pen is not None else "")
+    tag += ("_la" if args.lookahead else "")
     tag += ("_ft" if (args.init_from and not args.eval_only) else "")  # warm-started fine-tune run
     tag += f"_seed{args.seed}"
 
@@ -262,6 +265,8 @@ def main():
                    help="override steering-smoothness penalty λ (|Δsteer| coef); for the λ sweep")
     p.add_argument("--eval-only", action="store_true",
                    help="idx=0 eval dump of --init-from model (no training); writes {tag}_eval0.csv")
+    p.add_argument("--lookahead", action="store_true",
+                   help="append curvature look-ahead features to the obs (Phase-3 sensor ablation)")
     p.add_argument("--smoke", action="store_true", help="tiny run to verify the pipeline")
     p.add_argument("--device", default="auto")
     args = p.parse_args()

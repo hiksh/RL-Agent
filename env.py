@@ -56,6 +56,10 @@ RAY_ANGLES  = np.deg2rad([-70, -35, 0, 35, 70])
 MAX_RAY     = 120.0     # m, normalisation cap
 RAY_WIN     = (-4, 28)  # boundary-segment index window (relative to car idx)
 
+# Curvature look-ahead (Phase-3): signed track turn over the next d metres, like
+# pace notes — lets the policy brake/turn for a corner BEFORE the rays see a wall.
+LOOKAHEAD_DIST = (30.0, 70.0)   # m ahead (near, far), normalised by pi
+
 # Reward shaping
 PROGRESS_SCALE = 0.05   # reward per metre of forward progress
 TIME_PEN       = 0.03   # per-step cost -> rewards finishing fast
@@ -85,7 +89,8 @@ class F1DriverEnv(gym.Env):
                  overheat_pen=OVERHEAT_PEN, slip_pen=SLIP_PEN, pit_pen=PIT_PEN,
                  crash_pen=CRASH_PEN, complete_bonus=COMPLETE_BONUS,
                  speed_reward=0.0, finish_time_bonus=0.0, steer_pen=0.0,
-                 use_raycast=True, random_weather=False, random_start=False):
+                 use_raycast=True, random_weather=False, random_start=False,
+                 lookahead=False):
         super().__init__()
         # reward weights (kwargs default to the module constants -> baseline
         # behaviour unchanged; override per-instance for ablation studies)
@@ -98,6 +103,7 @@ class F1DriverEnv(gym.Env):
         self.random_weather = random_weather      # True  -> random wet start (activate pit strategy)
         self.steer_pen = steer_pen                # penalise |Δsteer| per step -> smoother steering (Phase-3)
         self.random_start = random_start          # True  -> reset at a random track idx (training-only curriculum)
+        self.lookahead = lookahead                # True  -> append curvature look-ahead features (obs ablation)
         cl, left, right, half_w, length_m = _load_track()
         self.cl       = cl.astype(np.float64)
         self.left     = left.astype(np.float64)
@@ -125,7 +131,8 @@ class F1DriverEnv(gym.Env):
         # symmetric [-1,1] action space (best practice for SB3 / SAC);
         # ers_deploy is mapped to [0,1] internally in step().
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
-        self.obs_dim = 1 + 2 + 1 + 1 + 1 + 1 + N_RAYS + 1 + 1   # = 14
+        self.obs_dim = (1 + 2 + 1 + 1 + 1 + 1 + N_RAYS + 1 + 1   # = 14
+                        + (len(LOOKAHEAD_DIST) if lookahead else 0))   # +2 with look-ahead
         self.observation_space = spaces.Box(
             low=-3.0, high=3.0, shape=(self.obs_dim,), dtype=np.float32)
 
@@ -169,22 +176,28 @@ class F1DriverEnv(gym.Env):
             out[k] = min(dist, MAX_RAY) / MAX_RAY
         return out
 
+    def _curvature_lookahead(self):
+        """Signed track turn (normalised by pi) over the next LOOKAHEAD_DIST metres,
+        relative to the current centreline heading — anticipatory corner info."""
+        out = np.empty(len(LOOKAHEAD_DIST), dtype=np.float32)
+        tx, ty = self.tang[self.idx]
+        for k, dist in enumerate(LOOKAHEAD_DIST):
+            target = (self.s[self.idx] + dist) % self.length_m
+            j = int(np.searchsorted(self.s, target) % self.N)
+            ax, ay = self.tang[j]
+            out[k] = np.arctan2(tx * ay - ty * ax, tx * ax + ty * ay) / np.pi
+        return out
+
     def _get_obs(self):
         sin, cos = self._heading_err()
         lat = self._lateral_offset() / max(self.half_w[self.idx], 1e-3)
         rays = self._rays if self.use_raycast else np.ones(N_RAYS, dtype=np.float32)
-        obs = np.array([
-            self.speed / MAX_SPEED,
-            sin, cos,
-            np.clip(lat, -2, 2),
-            float(self.compound),
-            self.temp,
-            self.ers,
-            *rays,
-            self.wetness,
-            self.rain_prob,
-        ], dtype=np.float32)
-        return np.clip(obs, -3.0, 3.0)
+        feats = [self.speed / MAX_SPEED, sin, cos, np.clip(lat, -2, 2),
+                 float(self.compound), self.temp, self.ers,
+                 *rays, self.wetness, self.rain_prob]
+        if self.lookahead:
+            feats.extend(self._curvature_lookahead())
+        return np.clip(np.array(feats, dtype=np.float32), -3.0, 3.0)
 
     # ------------------------------------------------------------------ gym API
     def reset(self, *, seed=None, options=None):
