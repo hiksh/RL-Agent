@@ -177,6 +177,7 @@ def train_one(algo, args, device):
         print(f"fine-tuning from {args.init_from}" + (f"  lr={args.learning_rate}" if co else ""))
         model = spec["cls"].load(args.init_from, env=venv, device=device,
                                  tensorboard_log=tb, custom_objects=co)
+        model.set_random_seed(args.seed)              # .load() restores base RNG; reseed per run
     else:
         model = build_model(algo, venv, device, args.seed, tb)
     model.learn(total_timesteps=steps, progress_bar=not args.smoke,
