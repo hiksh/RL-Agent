@@ -255,6 +255,28 @@ PDF 요구(① value-based ② policy-based ③ your solution)에 맞춘 라인�
 - **로깅**: `EvalCallback`(주기 평가), `CheckpointCallback`(체크포인트), `EpisodeMetrics`(에피소드별
   성공/크래시/랩길이/평균속도/과열비율 → CSV — 모든 figure를 이 CSV로 재생성), tensorboard.
 
+### 5-1. MDP에 맞춘 하이퍼파라미터 조정 (α · γ · ε)
+
+> *"How do you adjust hyperparameters to solve your MDP?"* — 이 MDP의 특성(긴 에피소드·먼 완주 보상·
+> 연속 고차원 액션)에 맞춰 세 축을 다음과 같이 조정했습니다.
+
+- **α (learning rate)**: 이산 Q인 **DQN은 1e-3**, 액터-크리틱 연속 제어(**PPO/SAC/TD3)는 3e-4**로 더 보수적
+  (큰 α는 연속 정책에서 진동·발산 위험). **실증적 조정**: Phase-2 warm-start fine-tune에서 학습된 가중치를
+  보존하려 α를 **3e-4→1e-4로 낮췄으나**, 그래도 정책이 붕괴(§9-7) → *"수렴한 정책에 공격적 보상을 얹을 땐
+  낮은 α로도 불안정"*. (α를 실제로 바꿔 효과를 관측한 사례.)
+- **γ (discount)**: **0.99 고정**. 에피소드가 최대 1500스텝이고 **완주 보너스(+200)·terminal time-bonus가 수백
+  스텝 뒤**에 옴 → effective horizon ≈ `1/(1−γ)=100`스텝. γ를 낮추면(예 0.9) 먼 완주 보상이 사실상 사라져
+  근시안적 brake-and-park(§9-4)을 유발하므로, dense progress 보상과 함께 먼 완주까지 credit이 전파되도록 높게 둠
+  — Phase-2 terminal 보너스 설계(§6-1)가 이 높은 γ에 의존.
+- **ε (exploration)**: **알고리즘마다 탐색 메커니즘이 다른 것이 핵심**. **DQN**만 진짜 ε-greedy
+  (`exploration_fraction 0.3`로 초반 1.0→0.05 감쇠, 그래도 이산 액션 주행 실패 §9-2). **SAC는 ε 없이
+  `ent_coef=auto`** 가 엔트로피 온도를 자동 조절해 탐색량을 스스로 정하고(샘플효율 최고 §9-1), **PPO**는 정책
+  확률성, **TD3**는 외부 `action_noise N(0,0.1)`로 탐색 → *"연속 제어에선 ε-greedy가 아니라 stochastic
+  policy/entropy로 탐색한다"*.
+
+*(참고: Phase-3 부드러움 λ(§6-2)는 같은 "sweep할 계수"지만 **보상 설계 계수**이지 RL 하이퍼파라미터(α/γ/ε)가
+아니므로, λ 선정은 §9-9에서 따로 보고합니다.)*
+
 ---
 
 ## 6. 리워드 셰이핑 & Ablation
