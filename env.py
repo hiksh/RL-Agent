@@ -84,8 +84,8 @@ class F1DriverEnv(gym.Env):
                  progress_scale=PROGRESS_SCALE, time_pen=TIME_PEN,
                  overheat_pen=OVERHEAT_PEN, slip_pen=SLIP_PEN, pit_pen=PIT_PEN,
                  crash_pen=CRASH_PEN, complete_bonus=COMPLETE_BONUS,
-                 speed_reward=0.0, finish_time_bonus=0.0,
-                 use_raycast=True, random_weather=False):
+                 speed_reward=0.0, finish_time_bonus=0.0, steer_pen=0.0,
+                 use_raycast=True, random_weather=False, random_start=False):
         super().__init__()
         # reward weights (kwargs default to the module constants -> baseline
         # behaviour unchanged; override per-instance for ablation studies)
@@ -96,6 +96,8 @@ class F1DriverEnv(gym.Env):
         self.finish_time_bonus = finish_time_bonus  # extra terminal reward scaled by how early the race finished
         self.use_raycast = use_raycast            # False -> mask ray obs (ablation)
         self.random_weather = random_weather      # True  -> random wet start (activate pit strategy)
+        self.steer_pen = steer_pen                # penalise |Δsteer| per step -> smoother steering (Phase-3)
+        self.random_start = random_start          # True  -> reset at a random track idx (training-only curriculum)
         cl, left, right, half_w, length_m = _load_track()
         self.cl       = cl.astype(np.float64)
         self.left     = left.astype(np.float64)
@@ -190,9 +192,10 @@ class F1DriverEnv(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
 
-        self.idx      = 0
-        self.pos      = self.cl[0].copy()
-        self.heading  = float(np.arctan2(self.tang[0, 1], self.tang[0, 0]))
+        start = int(self._rng.integers(self.N)) if self.random_start else 0
+        self.idx      = start
+        self.pos      = self.cl[start].copy()
+        self.heading  = float(np.arctan2(self.tang[start, 1], self.tang[start, 0]))
         self.speed    = 0.0
         self.compound = DRY
         self.temp     = TIRE_AMB
@@ -208,9 +211,11 @@ class F1DriverEnv(gym.Env):
 
         self.laps     = 0
         self.steps    = 0
-        self.progress = 0.0          # metres travelled along the track
-        self._prev_progress = 0.0
+        self.progress = float(self.s[start])   # arc-length at the (possibly random) start
+        self._prev_progress = self.progress
         self._speed_sum     = 0.0    # for episode mean-speed metric
+        self._prev_steer    = 0.0
+        self._jerk_sum      = 0.0    # sum of |Δsteer| -> smoothness metric
         self._overheat_steps = 0
         self._rays    = self._raycast()
         return self._get_obs(), {}
@@ -289,6 +294,12 @@ class F1DriverEnv(gym.Env):
         reward += (self.progress_scale * max(d_prog, 0.0) - self.time_pen
                    + self.speed_reward * (self.speed / MAX_SPEED))
 
+        # steering-smoothness penalty (|Δsteer| -> discourage jerky inputs)
+        dsteer = abs(steer - self._prev_steer)
+        self._prev_steer = steer
+        self._jerk_sum += dsteer
+        reward -= self.steer_pen * dsteer
+
         # penalties
         if self.temp > TEMP_OVERHEAT:
             reward -= self.overheat_pen
@@ -318,7 +329,8 @@ class F1DriverEnv(gym.Env):
                 "speed": self.speed, "off_track": off_track,
                 "crashed": bool(off_track), "success": bool(success),
                 "mean_speed": self._speed_sum / max(self.steps, 1),
-                "overheat_frac": self._overheat_steps / max(self.steps, 1)}
+                "overheat_frac": self._overheat_steps / max(self.steps, 1),
+                "jerk": self._jerk_sum / max(self.steps, 1)}
         return self._get_obs(), float(reward), terminated, truncated, info
 
 

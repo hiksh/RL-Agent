@@ -55,6 +55,8 @@ REWARD_PRESETS = {
     "timeattack_dense":  dict(crash_pen=100.0, speed_reward=0.10, time_pen=0.06),  # stronger dense pace pressure
     "timeattack_finish": dict(crash_pen=100.0, speed_reward=0.05, finish_time_bonus=300.0),  # terminal fast-finish bonus
     "timeattack":        dict(crash_pen=100.0, speed_reward=0.10, time_pen=0.06, finish_time_bonus=300.0),  # both
+    # Phase-3: timeattack + steering-smoothness penalty (sweep λ via --steer-pen)
+    "timeattack_smooth": dict(crash_pen=100.0, speed_reward=0.10, time_pen=0.06, finish_time_bonus=300.0, steer_pen=0.05),
 }
 
 
@@ -62,7 +64,7 @@ class EpisodeMetrics(BaseCallback):
     """Logs per-episode racing metrics (success/crash/lap/speed) to a CSV so the
     report's curves and comparisons can be regenerated from one training run."""
     FIELDS = ["timestep", "ep_reward", "ep_len", "laps", "success",
-              "crashed", "mean_speed", "overheat_frac", "progress_m"]
+              "crashed", "mean_speed", "overheat_frac", "progress_m", "jerk"]
 
     def __init__(self, csv_path):
         super().__init__()
@@ -88,6 +90,7 @@ class EpisodeMetrics(BaseCallback):
                     "mean_speed": round(float(info.get("mean_speed", 0.0)), 3),
                     "overheat_frac": round(float(info.get("overheat_frac", 0.0)), 4),
                     "progress_m": round(float(info.get("progress_m", 0.0)), 1),
+                    "jerk": round(float(info.get("jerk", 0.0)), 4),
                 })
                 self._f.flush()
         return True
@@ -141,9 +144,15 @@ def train_one(algo, args, device):
         env_kwargs["use_raycast"] = False
     if args.random_weather:
         env_kwargs["random_weather"] = True
+    if args.steer_pen is not None:
+        env_kwargs["steer_pen"] = args.steer_pen
+    if args.random_start:
+        env_kwargs["random_start"] = True
 
     tag = algo + ("" if preset == "baseline" else f"_{preset}")
     tag += ("_noray" if args.no_raycast else "") + ("_wx" if args.random_weather else "")
+    tag += ("_rs" if args.random_start else "")
+    tag += (f"_sp{args.steer_pen}" if args.steer_pen is not None else "")
     tag += ("_ft" if args.init_from else "")          # warm-started fine-tune run
     tag += f"_seed{args.seed}"
 
@@ -154,9 +163,10 @@ def train_one(algo, args, device):
     print(f"\n=== {algo.upper()}  |  steps={steps:,}  n_envs={n_envs}  device={device}  "
           f"reward={preset}  raycast={not args.no_raycast}  random_weather={args.random_weather} ===")
 
+    eval_kwargs = dict(env_kwargs, random_start=False)   # eval/metrics always from idx=0 (comparable to Phase-1/2)
     venv = make_vec_env(make_env(disc, args.n_laps, env_kwargs), n_envs=n_envs,
                         seed=args.seed, vec_env_cls=vec_cls)
-    eval_env = make_vec_env(make_env(disc, args.n_laps, env_kwargs), n_envs=1,
+    eval_env = make_vec_env(make_env(disc, args.n_laps, eval_kwargs), n_envs=1,
                             seed=args.seed + 1000, vec_env_cls=DummyVecEnv)
 
     callbacks = [
@@ -207,6 +217,10 @@ def main():
     p.add_argument("--no-raycast", action="store_true", help="mask raycast obs (sensor ablation)")
     p.add_argument("--random-weather", action="store_true",
                    help="random wet start each episode (activate tire/pit strategy)")
+    p.add_argument("--random-start", action="store_true",
+                   help="reset training episodes at a random track position (Phase-3 curriculum); eval stays at idx=0")
+    p.add_argument("--steer-pen", type=float, default=None,
+                   help="override steering-smoothness penalty λ (|Δsteer| coef); for the λ sweep")
     p.add_argument("--smoke", action="store_true", help="tiny run to verify the pipeline")
     p.add_argument("--device", default="auto")
     args = p.parse_args()
