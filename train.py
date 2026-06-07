@@ -135,6 +135,34 @@ def build_model(algo, venv, device, seed, tb):
     raise ValueError(algo)
 
 
+EVAL0_EPISODES = 300
+
+def eval_idx0(model, disc, n_laps, env_kwargs, csv_path, n_episodes):
+    """Post-training evaluation from the fixed idx=0 start, so random-start (Phase-3)
+    runs stay comparable to Phase-1/2.  Stochastic policy (like the training-rollout
+    metrics) + env weather rng -> a distribution.  Same FIELDS as EpisodeMetrics."""
+    env = make_env(disc, n_laps, dict(env_kwargs, random_start=False))()
+    with open(csv_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=EpisodeMetrics.FIELDS)
+        w.writeheader()
+        for _ in range(n_episodes):
+            obs, _ = env.reset()
+            done = trunc = False; ep_r = 0.0; ep_len = 0; info = {}
+            while not (done or trunc):
+                act, _ = model.predict(obs, deterministic=False)
+                obs, r, done, trunc, info = env.step(act)
+                ep_r += float(r); ep_len += 1
+            w.writerow({"timestep": int(getattr(model, "num_timesteps", 0)),
+                        "ep_reward": round(ep_r, 2), "ep_len": ep_len,
+                        "laps": int(info.get("laps", 0)),
+                        "success": int(info.get("success", False)),
+                        "crashed": int(info.get("crashed", False)),
+                        "mean_speed": round(float(info.get("mean_speed", 0.0)), 3),
+                        "overheat_frac": round(float(info.get("overheat_frac", 0.0)), 4),
+                        "progress_m": round(float(info.get("progress_m", 0.0)), 1),
+                        "jerk": round(float(info.get("jerk", 0.0)), 4)})
+
+
 def train_one(algo, args, device):
     spec = ALGOS[algo]
     disc = spec["discretized"]
@@ -153,8 +181,15 @@ def train_one(algo, args, device):
     tag += ("_noray" if args.no_raycast else "") + ("_wx" if args.random_weather else "")
     tag += ("_rs" if args.random_start else "")
     tag += (f"_sp{args.steer_pen}" if args.steer_pen is not None else "")
-    tag += ("_ft" if args.init_from else "")          # warm-started fine-tune run
+    tag += ("_ft" if (args.init_from and not args.eval_only) else "")  # warm-started fine-tune run
     tag += f"_seed{args.seed}"
+
+    if args.eval_only:                                # idx=0 eval of an existing model, no training
+        model = spec["cls"].load(args.init_from, device=device)
+        path = os.path.join(RESULTS, f"{tag}_eval0.csv")
+        eval_idx0(model, disc, args.n_laps, env_kwargs, path, 5 if args.smoke else EVAL0_EPISODES)
+        print(f"eval-only idx=0 -> {path}")
+        return
 
     steps = args.timesteps or (3_000 if args.smoke else DEFAULT_STEPS[algo])
     n_envs = 2 if args.smoke else (args.n_envs if algo == "ppo" else 1)
@@ -196,6 +231,10 @@ def train_one(algo, args, device):
     out = os.path.join(RESULTS, f"{tag}.zip")
     model.save(out)
     print(f"saved -> {out}")
+    if args.random_start:                             # idx=0 eval -> metrics comparable to Phase-1/2
+        path = os.path.join(RESULTS, f"{tag}_eval0.csv")
+        eval_idx0(model, disc, args.n_laps, env_kwargs, path, 5 if args.smoke else EVAL0_EPISODES)
+        print(f"idx=0 eval -> {path}")
     venv.close(); eval_env.close()
 
 
@@ -221,6 +260,8 @@ def main():
                    help="reset training episodes at a random track position (Phase-3 curriculum); eval stays at idx=0")
     p.add_argument("--steer-pen", type=float, default=None,
                    help="override steering-smoothness penalty λ (|Δsteer| coef); for the λ sweep")
+    p.add_argument("--eval-only", action="store_true",
+                   help="idx=0 eval dump of --init-from model (no training); writes {tag}_eval0.csv")
     p.add_argument("--smoke", action="store_true", help="tiny run to verify the pipeline")
     p.add_argument("--device", default="auto")
     args = p.parse_args()

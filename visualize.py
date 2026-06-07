@@ -202,9 +202,10 @@ def animate_drive(frames, algo, save, stride=2, fps=20):
 def _smooth(x, w):
     w = min(w, len(x)); return np.convolve(x, np.ones(w)/w, mode="valid") if w > 0 else x
 
-def _seed_csvs(tag):
-    """All per-seed metric CSVs for a tag (everything except the _seed<n> suffix)."""
-    paths = sorted(glob.glob(os.path.join(RESULTS, f"{tag}_seed*_metrics.csv")))
+def _seed_csvs(tag, kind="metrics"):
+    """All per-seed CSVs for a tag.  kind="metrics" = training rollouts (default);
+    kind="eval0" = post-training idx=0 evaluation (Phase-3, comparable to Phase-1/2)."""
+    paths = sorted(glob.glob(os.path.join(RESULTS, f"{tag}_seed*_{kind}.csv")))
     return [np.genfromtxt(p, delimiter=",", names=True) for p in paths]
 
 def _final(arrays, key, last=300):
@@ -250,9 +251,9 @@ def plot_learning_curves(groups, save, w=100):
     ax.set_title("Learning Curves (mean ± std over seeds)"); ax.legend(); ax.grid(alpha=0.3)
     _save(fig, save)
 
-def plot_bar_comparison(groups, save, title):
+def plot_bar_comparison(groups, save, title, kind="metrics"):
     """4-panel: success% / crash% / reward / steps-to-finish."""
-    data = [(lab, _seed_csvs(tag), col) for lab, tag, col in groups]
+    data = [(lab, _seed_csvs(tag, kind), col) for lab, tag, col in groups]
     data = [d for d in data if d[1]]
     if not data:
         return
@@ -311,6 +312,10 @@ RAYCAST_ABL = [("raycast ON", "sac_racing", "#2E7D32"), ("raycast OFF", "sac_rac
 TIMEATTACK  = [("racing", "sac_racing", "#9E9E9E"), ("ta_dense", "sac_timeattack_dense", "#90CAF9"),
                ("ta_finish", "sac_timeattack_finish", "#FFB74D"), ("timeattack", "sac_timeattack", "#D0021B")]
 FINETUNE    = [("racing (base)", "sac_racing", "#9E9E9E"), ("timeattack FT", "sac_timeattack_ft", "#D0021B")]
+# Phase-3: random-start curriculum + steering-smoothness λ sweep (all idx=0 eval -> comparable).
+PHASE3 = [("timeattack", "sac_timeattack", "#9E9E9E"), ("curric λ=0", "sac_timeattack_rs_sp0.0", "#90CAF9"),
+          ("λ=0.02", "sac_timeattack_rs_sp0.02", "#FFB74D"), ("λ=0.05", "sac_timeattack_rs_sp0.05", "#FF7043"),
+          ("λ=0.1", "sac_timeattack_rs_sp0.1", "#D0021B")]
 
 
 def main():
@@ -340,6 +345,8 @@ def main():
                         "SAC Time-attack Reward Study (true objective)")
     plot_bar_comparison(FINETUNE, os.path.join(VIZ, "finetune_compare.png"),
                         "SAC racing -> time-attack fine-tune")
+    plot_bar_comparison(PHASE3, os.path.join(VIZ, "phase3_curriculum_smooth.png"),
+                        "Phase-3: random-start curriculum + smoothness λ (idx=0 eval)", kind="eval0")
     plot_eval_curve()
     print("\nDone. Figures in results/viz/")
 

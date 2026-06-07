@@ -302,6 +302,21 @@ dense `time_pen`(0.03)보다 훨씬 강하지만, **완주해야만 받는 termi
 있는가" 확인. **평가는 불변 지표(랩타임/성공률/크래시율)로만** — 프리셋마다 보상 스케일이 달라 보상끼리 비교 불가.
 결과는 §9-7.
 
+### 6-2. Phase-3: 부드럽고 빠른 코너링 (커리큘럼 + 부드러움)
+
+Phase-2 최적(`timeattack`)도 성공률이 낮은 핵심 원인은 **코너**입니다(§9-7). 두 개의 직교 레버로 이를 공략합니다:
+
+- **① 랜덤 시작 커리큘럼**(env `random_start`): 지금까지 모든 에피소드가 idx=0에서 출발해 **1번 코너만 수천 번**
+  연습하고 뒤쪽 코너는 거기까지 살아남아야만 봤습니다. 학습 시 reset 위치를 트랙 전 구간에 균등 랜덤 배치해
+  **모든 코너를 균등 연습**합니다. **평가·보고 지표는 idx=0 고정**(Phase-1/2와 동일 비교축).
+- **② 부드러움 페널티 λ**(env `steer_pen`): 스텝당 `−λ·|Δsteer|`로 덜컥대는 조향을 억제합니다. λ가 너무 크면
+  다시 timid(brake-and-park §9-4)해지므로 **명확한 sweet spot**이 존재 → λ ∈ {0, 0.02, 0.05, 0.1} **sweep**으로
+  "**랩타임·성공률을 노이즈 내로 유지하며 jerk(=평균 `|Δsteer|`)를 최소화하는 λ**"를 선정.
+
+**측정 방법**: 학습은 랜덤 시작이라 학습 롤아웃 지표는 idx=0과 비교 불가. 따라서 학습 후 **idx=0에서 별도 평가**
+(`{tag}_eval0.csv`, 확률적 정책 300ep — 학습 롤아웃과 같은 분포)를 떠서 그걸로만 §9-9를 보고합니다.
+λ=0 sweep 점은 **커리큘럼 단독** 효과(랜덤 시작 vs Phase-2 idx=0)를 격리합니다. 결과는 §9-9.
+
 ---
 
 ## 7. 실행 방법
@@ -331,11 +346,18 @@ python train.py --algo sac --reward-preset timeattack --seed 0
 python train.py --algo sac --reward-preset timeattack --seed 0 \
     --init-from results/sac_racing_seed0_best/best_model.zip --learning-rate 1e-4 --timesteps 200000
 
+# 3c) Phase-3 커리큘럼 + 부드러움 (§6-2) — 학습은 랜덤 시작, 평가는 idx=0
+python train.py --algo sac --reward-preset timeattack --steer-pen 0.05 --random-start --seed 0
+#  기존 best 모델을 재학습 없이 idx=0로 평가만 (Phase-2 베이스라인):
+python train.py --algo sac --reward-preset timeattack --eval-only \
+    --init-from results/sac_timeattack_seed0_best/best_model.zip --seed 0
+
 # 4) 시각화 (results/의 모델·로그를 자동 탐색)
 python visualize.py
 ```
 
-서버에서 한 번에: **메인+ablation은 `bash run_all.sh`**, **Phase-2는 `bash run_phase2.sh`**(run_all 이후 실행).
+서버에서 한 번에: **메인+ablation은 `bash run_all.sh`**, **Phase-2는 `bash run_phase2.sh`**,
+**Phase-3는 `bash run_phase3.sh`**(각각 앞 단계 이후 실행).
 
 **출력물**(`results/`): `<tag>.zip`(모델), `<tag>_best/`(best), `<tag>_metrics.csv`, `eval/evaluations.npz`,
 `tb/`(tensorboard), `viz/*.png|gif`. 태그 = `<algo>[_<preset>][_noray][_wx][_ft]_seed<n>`.
@@ -353,6 +375,7 @@ python visualize.py
 ├── visualize.py      # 트랙맵·레이싱라인·raycast GIF·학습곡선·알고리즘 비교·ablation
 ├── run_all.sh        # 메인 매트릭스(4 algo×5 seed) + 보상/raycast ablation + viz (GPU 서버)
 ├── run_phase2.sh     # Phase-2 타임어택 reward sweep + warm-start fine-tune + viz
+├── run_phase3.sh     # Phase-3 랜덤 시작 커리큘럼 + 부드러움 λ sweep + idx=0 eval + viz
 ├── requirements.txt
 ├── assets/           # track.npz, track.webp, track_preview.png
 └── results/          # 학습 결과물 (CSV·figure·best 모델 일부만 커밋, 나머지 .gitignore)
@@ -496,6 +519,23 @@ best 모델은 시드별로 다르나 학습 곡선은 단일 트레이스로만
 - **SAC = 가장 빠르고 안전**(your solution으로서 타당), **PPO = 가장 자주 완주** — 둘이 상보적.
 - 보상 셰이핑(§9-4)이 brake-and-park 탈출에 결정적, raycast 센서(§9-5)는 안전성에 기여.
 - Phase-2(§9-6/7): 진짜 목표(제한시간 내 최단 완주)를 보상에 직접 인코딩 → **`timeattack`(dense+terminal)이 최적** — racing 대비 랩타임 −4.2 s·성공률 ≈2배·크래시율 −3.5 pp(Pareto 개선). dense가 핵심 레버, terminal 단독은 sparse해 무효, warm-start fine-tune은 붕괴.
+- Phase-3(§6-2/9-9, 진행 중): 코너 약점을 **랜덤 시작 커리큘럼 + 부드러움 페널티 λ**로 공략 — idx=0 평가로 비교.
+
+### 9-9. Phase-3 결과 — 커리큘럼 + 부드러움 (학습 후 업데이트)
+
+> 🚧 `bash run_phase3.sh` 완료 후 figure(`results/viz/phase3_curriculum_smooth.png`)와 아래 표를 채웁니다.
+> 모든 행은 **idx=0 평가**(`{tag}_eval0.csv`, §6-2)라 Phase-1/2와 같은 축. jerk = 스텝당 평균 `|Δsteer|`.
+
+| 설정 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | jerk ↓ | 비고 |
+|------|------------:|---------:|-----------:|-------:|------|
+| timeattack (idx=0) | 114.1 | 5.4 % | 15.0 % | TBD | Phase-2 최적(eval-only) |
+| + 커리큘럼 (λ=0) | TBD | TBD | TBD | TBD | 랜덤 시작만 격리 |
+| + λ=0.02 | TBD | TBD | TBD | TBD | |
+| + λ=0.05 | TBD | TBD | TBD | TBD | |
+| + λ=0.1 | TBD | TBD | TBD | TBD | |
+
+*(빈칸은 학습 후 채움 — ① 랜덤 시작 커리큘럼이 코너 연습으로 성공률/크래시를 개선하는지, ② 랩타임·성공률을
+노이즈 내로 유지하며 jerk를 낮추는 최적 λ는 무엇인지 보고)*
 
 ---
 
