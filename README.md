@@ -294,7 +294,7 @@ PDF 요구(① value-based ② policy-based ③ your solution)에 맞춘 라인�
 
 → 이 변형들이 **your solution(SAC)의 ablation study**를 구성합니다(결과 §9-4). raycast on/off(`--no-raycast`) ablation은 §9-5.
 
-### 6-1. Phase-2: 타임어택 reward 설계 (진짜 목표 직접 최적화) — *진행 중*
+### 6-1. Phase-2: 타임어택 reward 설계 (진짜 목표 직접 최적화)
 
 본 과제의 *진짜* 목표는 **제한시간(3랩 = 375 s) 안에 가능한 빠르게 완주**하는 것입니다. Phase-1 결과를 분석하니
 **시간제한이 binding**임을 발견했습니다 — 완주한 에피소드의 랩타임(SAC 118.3 s, PPO 121.3 s)이 제한선(125 s/랩)에
@@ -379,6 +379,14 @@ python train.py --algo sac --reward-preset timeattack --steer-pen 0.05 --random-
 python train.py --algo sac --reward-preset timeattack --eval-only \
     --init-from results/sac_timeattack_seed0_best/best_model.zip --seed 0
 
+# 3d) 제어이론 baseline (§9-10) — pure-pursuit dry/wet eval + 비교 figure
+python baseline.py
+#  RL 모델을 동일 조건(dry/wet)에서 평가 (head-to-head):
+python train.py --algo sac --reward-preset timeattack --lookahead --eval-only \
+    --init-from results/sac_timeattack_rs_sp0.0_la_seed0_best/best_model.zip --seed 0
+python train.py --algo sac --reward-preset timeattack --lookahead --random-weather --eval-only \
+    --init-from results/sac_timeattack_rs_sp0.0_la_seed0_best/best_model.zip --seed 0
+
 # 4) 시각화 (results/의 모델·로그를 자동 탐색)
 python visualize.py
 ```
@@ -399,6 +407,7 @@ python visualize.py
 ├── env.py            # F1DriverEnv (gymnasium 연속 환경: 상태·행동·전이·보상)
 ├── wrappers.py       # DiscretizedF1Driver (DQN용 21개 이산 액션)
 ├── train.py          # SB3 학습 파이프라인 (DQN/PPO/SAC/TD3, 프리셋·fine-tune·eval·ckpt·metrics·tb)
+├── baseline.py       # 비-RL 제어 baseline (pure-pursuit) + dry/wet eval·비교 figure (§9-10)
 ├── visualize.py      # 트랙맵·레이싱라인·raycast GIF·학습곡선·알고리즘 비교·ablation
 ├── run_all.sh        # 메인 매트릭스(4 algo×5 seed) + 보상/raycast ablation + viz (GPU 서버)
 ├── run_phase2.sh     # Phase-2 타임어택 reward sweep + warm-start fine-tune + viz
@@ -491,7 +500,7 @@ DQN은 출발 직후 충돌(빨간 X)로 종료. PPO·TD3 궤적은 `results/viz
 **충돌을 회피(안전성↑)** 하는 대신 다소 보수적으로 만듭니다 — 센서가 안전 주행에 기여함을 확인.
 (메인 비교의 raycast-ON SAC는 5 시드 평균 크래시 18.5 %; OFF는 단일 시드라 절대수치보다 **경향**으로 해석)
 
-### 9-6. 진행 중 — Phase-2 타임어택 reward 설계 (스토리)
+### 9-6. Phase-2 타임어택 reward 설계 (스토리)
 
 > `bash run_phase2.sh` 완료 후 §9-7 표를 채웁니다. 아래는 **가설과 진행 방향**.
 
@@ -546,41 +555,86 @@ best 모델은 시드별로 다르나 학습 곡선은 단일 트레이스로만
 - **SAC = 가장 빠르고 안전**(your solution으로서 타당), **PPO = 가장 자주 완주** — 둘이 상보적.
 - 보상 셰이핑(§9-4)이 brake-and-park 탈출에 결정적, raycast 센서(§9-5)는 안전성에 기여.
 - Phase-2(§9-6/7): 진짜 목표(제한시간 내 최단 완주)를 보상에 직접 인코딩 → **`timeattack`(dense+terminal)이 최적** — racing 대비 랩타임 −4.2 s·성공률 ≈2배·크래시율 −3.5 pp(Pareto 개선). dense가 핵심 레버, terminal 단독은 sparse해 무효, warm-start fine-tune은 붕괴.
-- Phase-3(§6-2/9-9, 진행 중): 코너 약점을 **랜덤 시작 커리큘럼 + 부드러움 페널티 λ**로 공략 — idx=0 평가로 비교.
+- Phase-3(§6-2/9-9): 코너 약점을 세 레버로 공략 — **곡률 look-ahead obs가 결정적**(완주율 17%→45%, 시드 간 분산 제거·크래시 0). 커리큘럼·부드러움 λ sweep은 시드 복권(bimodal)으로 불안정.
+- 제어 baseline(§9-10): pure-pursuit와 head-to-head — 완주율 동률이나 **RL이 랩타임 ~14% 빠름**(ERS 활용) → "왜 RL인가"의 실증.
 
-### 9-9. Phase-3 결과 — 커리큘럼 + 부드러움 (학습 후 업데이트)
+### 9-9. Phase-3 결과 — 커리큘럼 + 부드러움 + look-ahead
 
-> 🚧 `bash run_phase3.sh` 완료 후 figure(`results/viz/phase3_curriculum_smooth.png`)와 아래 표를 채웁니다.
-> 모든 행은 **idx=0 평가**(`{tag}_eval0.csv`, §6-2)라 Phase-1/2와 같은 축. jerk = 스텝당 평균 `|Δsteer|`.
+> 모든 행은 **idx=0 평가**(`{tag}_eval0.csv`, §6-2, 확률적 정책 300ep × 3 seed)라 Phase-1/2와 같은 축.
+> jerk = 스텝당 평균 `|Δsteer|`. 표의 ±는 seed 간 표준편차이며, 랩타임은 성공 에피소드에서만 산출합니다(맨 오른쪽 열).
 
-| 설정 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | jerk ↓ | 비고 |
-|------|------------:|---------:|-----------:|-------:|------|
-| timeattack (idx=0) | 114.1 | 5.4 % | 15.0 % | TBD | Phase-2 최적(eval-only) |
-| + 커리큘럼 (λ=0) | TBD | TBD | TBD | TBD | 랜덤 시작만 격리 |
-| + λ=0.02 | TBD | TBD | TBD | TBD | |
-| + λ=0.05 | TBD | TBD | TBD | TBD | |
-| + λ=0.1 | TBD | TBD | TBD | TBD | |
+| 설정 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | jerk ↓ | 랩타임 산출 seed |
+|------|------------:|---------:|-----------:|-------:|:----------------:|
+| timeattack (idx=0) | 114.1 | 5.4 % | 15.0 % | — | Phase-2 최적(eval-only) |
+| + 커리큘럼 (λ=0) | 118.6 ± 7.4 | 16.6 ± 27.2 % | 1.3 ± 0.7 % | 0.203 ± 0.033 | **2 / 3** |
+| + λ=0.02 | 110.9 | 12.3 ± 21.4 % | 9.1 ± 12.2 % | 0.216 ± 0.061 | **1 / 3** |
+| + λ=0.05 | 101.8 | 14.3 ± 24.8 % | 15.1 ± 20.2 % | 0.220 ± 0.060 | **1 / 3** |
+| + λ=0.1 | 109.5 ± 1.5 | 33.4 ± 14.0 % | 16.7 ± 28.0 % | 0.236 ± 0.028 | 3 / 3 |
 
-*(빈칸은 학습 후 채움 — ① 랜덤 시작 커리큘럼이 코너 연습으로 성공률/크래시를 개선하는지, ② 랩타임·성공률을
-노이즈 내로 유지하며 jerk를 낮추는 최적 λ는 무엇인지 보고)*
+> **결과 해석 — λ sweep은 sweet spot이 아니라 "시드 복권"을 드러냈다.**
+> 성공률의 표준편차(±21–27%p)가 평균만큼 크다는 데서 보이듯, **커리큘럼·λ sweep config는 모두 이봉성(bimodal)**입니다.
+> seed별로 보면 세 시드 중 **하나만 운전을 배우고(성공률 ~40%) 나머지는 붕괴**(성공률 0%, 평균속도 3–10 m/s로 코스를
+> 기어다님)했습니다. 예) λ=0(커리큘럼만)은 seed1만 48% / seed0·2는 사실상 0%, λ=0.05는 seed0이 빠르지만 **크래시 38%**
+> 이고 seed1·2는 완주 0회. 그래서 위 표의 **랩타임은 "성공한 seed"에서만 산출**되며(맨 오른쪽 열), λ=0.02·0.05의
+> 101–111 s는 *유일하게 살아남은 1개 seed*의 값이라 config 대표값으로 신뢰할 수 없습니다 — 평균표가 거짓말을 하는 전형.
+> 또한 **부드러움 페널티는 목적(jerk↓)을 달성하지 못했습니다**: λ를 키워도 jerk가 0.203→0.236으로 오히려 **증가**(빠른
+> 주행일수록 `|Δsteer|`가 커지는 교란). 즉 ①·② 레버만으로는 코너 약점을 안정적으로 풀지 못했고, 해법은 ③(아래)입니다.
 
 **③ 곡률 look-ahead ablation** (커리큘럼 λ=0 위에 lookahead만 토글, idx=0 평가):
 
 ![lookahead ablation](results/viz/phase3_lookahead.png)
 
-| 설정 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | 비고 |
-|------|------------:|---------:|-----------:|------|
-| 커리큘럼 (no LA) | TBD | TBD | TBD | §9-9 λ=0 행과 동일 |
-| + look-ahead | TBD | TBD | TBD | 30 m·70 m 앞 곡률 obs +2 |
+| 설정 | 랩타임(s) ↓ | 성공률 ↑ | 크래시율 ↓ | 성공 seed | 비고 |
+|------|------------:|---------:|-----------:|:---------:|------|
+| 커리큘럼 (no LA) | 118.6 ± 7.4 | 16.6 ± 27.2 % | 1.3 ± 0.7 % | 2 / 3 | §9-9 λ=0 행과 동일 |
+| **+ look-ahead** | **101.3 ± 9.7** | **44.8 ± 2.3 %** | **0.0 ± 0.0 %** | **3 / 3** | 30 m·70 m 앞 곡률 obs +2 |
 
-*(빈칸은 학습 후 채움 — 앞 도로 모양을 미리 보는 것이 코너 진입 전 감속으로 크래시를 줄이는지 보고)*
+> **look-ahead가 Phase-3의 결정적 레버.** 성공률을 17%→45%로 올린 것보다 중요한 건 **분산을 죽였다는 점**입니다:
+> no-LA의 성공률 std는 ±27%p(이봉성)인데 **+LA는 ±2.3%p** — seed0·1·2가 각각 45/42/47%로 거의 동일하게 수렴했고
+> **세 시드 모두 크래시 0%**입니다. λ sweep이 못 한 "**어떤 seed로 돌려도 재현되는 정책**"을 곡률 미리보기 하나가
+> 해냈습니다. 코너를 *반응적으로*가 아니라 *예견해서* 감속하므로 탐험 운에 덜 의존해 안정적으로 학습되기 때문으로
+> 해석합니다. (RL에서 평균 성능 향상보다 시드 간 분산 제거가 더 어려운 결과이므로, 본 프로젝트의 헤드라인으로 보고합니다.)
+
+### 9-10. 제어이론 baseline (pure-pursuit) — *왜 RL인가?*
+
+"알려진 트랙에서 타임어택이면 RL 없이 고전 제어로 풀리지 않나?"는 정당한 질문입니다. 이를 정면으로 검증하기 위해
+**학습이 전혀 없는 기하 컨트롤러(pure-pursuit)**를 같은 평가축(idx=0, timeattack preset, 300 ep)에서 비교했습니다.
+중앙선 위 look-ahead 점을 추종하도록 조향하고(`δ ∝ sin α / L_d`), env의 요레이트 한계(`v_max = MAX_YAW/κ`)로부터
+코너 목표속도를 잡아 P-제어로 가감속합니다. **ERS·피트·타이어 열관리 같은 전략 레이어는 의도적으로 배제**(중립
+고정)했습니다 — 그 공백이 곧 RL이 정당화되는 지점이기 때문입니다. 구현은 `baseline.py`(`python baseline.py`).
+
+![pure-pursuit vs RL](results/viz/baseline_compare.png)
+
+> 공정 비교를 위해 **양쪽 모두 결정론적 정책**으로 평가했습니다(pure-pursuit는 본래 결정론적이므로 RL도
+> `deterministic=True`). **seed 0–2 × 300 ep**, ±는 seed 간 표준편차. 랩타임은 완주(success) 에피소드에서만 산출.
+
+| 방법 / 조건 | **랩타임(s) ↓** | 완주율 | 크래시율 ↓ | 과열율 ↓ |
+|------------|---------------:|----------:|----------:|--------:|
+| Pure-pursuit · dry | **111.6 ± 0.0** | 0.50 ± 0.01 | 0.50 ± 0.01 | 0.53 ± 0.00 |
+| RL look-ahead · dry | **96.1 ± 6.1** | 0.50 ± 0.01 | **0.00 ± 0.00** | **0.07 ± 0.03** |
+| Pure-pursuit · wet | 111.6 ± 0.0 | 0.28 ± 0.02 | 0.72 ± 0.02 | 0.53 ± 0.00 |
+| RL look-ahead · wet | 96.1 ± 6.1 | 0.28 ± 0.02 | **0.03 ± 0.05** | 0.23 ± 0.16 |
+
+> **결론 — 타임어택의 목적은 "시간 내, 최대한 빠르게 완주"다. 그 지표에서 RL이 이긴다.**
+> ① **완주율은 정확히 동률**(dry 0.50/0.50, wet 0.28/0.28)입니다. 둘 다 *랩 경계의 확률적 강우*(env가 매 랩 30% 확률로
+> 비를 발생 — 누구도 완전히 제어 못 함)라는 **같은 외부 천장**에 막히기 때문이라, 완주율만으로는 두 방법이 구분되지
+> 않습니다. ② 따라서 변별 지표는 **랩타임**인데, 여기서 **RL이 96.1 s vs 111.6 s로 ~14 % 빠릅니다.** 이유는 명확합니다 —
+> pure-pursuit는 **ERS(부스트 +10 m/s²)를 중립으로 버리는데**(최고속도는 둘 다 ~55–58 m/s로 비슷) RL은 **ERS를 거의 매
+> 스텝 배치**(평균 deploy ≈ 0.6)해 코너 탈출 가속이 빠릅니다. 즉 이 문제의 *주행 코어*(중앙선 추종)는 제어이론으로
+> 충분하지만, **ERS 같은 전략 레버를 활용한 시간 최적화**는 핸드코딩 대신 RL이 보상으로부터 학습한 부분이고, 그게
+> 랩타임 차이로 나타납니다.
+>
+> 부차적으로, RL은 같은 완주율을 **크래시 ~0 %**(vs 50–72 %)·**과열 0.07**(vs 0.53)로 달성합니다 — pure-pursuit가
+> "완주 아니면 충돌"로 절반 이상을 벽에 박는 반면, RL은 거대한 `CRASH_PEN`(=500)을 학습해 안전하게 김(실패는 전부
+> 시간초과). 크래시·과열이 타임어택의 *직접* 목적은 아니지만, **제어 baseline은 더 느린 랩타임에 더해 충돌·과열까지
+> 떠안는다**는 점이 대비를 완성합니다. (날씨는 양쪽 다 미해결 — 향후 과제 §10.)
 
 ---
 
 ## 10. 한계 & 향후 과제
 
 - **단일 트랙**: 한 서킷에만 학습 → 일반화 미검증. *향후*: 절차적 생성 트랙으로 멀티-트랙 일반화.
-- **낮은 절대 성공률(≤ 7 %)**: 마이크로 레이스 난도가 높음. Phase-2 reward 설계와 커리큘럼(쉬운 트랙→어려운 트랙)으로 개선 여지.
+- **완주율 천장(마른 트랙 ~50%)**: Phase-1 racing(≤7%) → Phase-2 timeattack → Phase-3 look-ahead로 완주율을 크게 끌어올렸으나, 남은 실패는 대부분 **랩 경계의 확률적 강우**(젖은 노면+DRY 타이어 슬립)로 인한 시간초과입니다(§9-10). 날씨 커리큘럼·피트 전략 학습이 다음 병목.
 - **TD3 불안정**: 결정론적 정책이 좁은 코너에서 나쁜 국소최적에 빠짐 → 노이즈 스케줄/하이퍼파라미터 재탐색 필요.
 - **날씨 강제(`--random-weather`) 시 재붕괴**: 젖은 출발이 timid collapse를 유발 → 현재는 랩 경계 자연발생만 사용. 날씨 커리큘럼이 향후 과제.
 - **물리 모델의 단순화**: bicycle 키네마틱 근사(타이어 슬립앵글·하중이동 등 미반영) — 교육용으로는 충분하나 사실성엔 한계.
